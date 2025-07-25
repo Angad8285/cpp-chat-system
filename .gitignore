@@ -1,0 +1,10 @@
+# Ignore compiled C++ executables
+server
+client
+
+# Ignore object files
+*.o
+
+# Ignore common OS-specific files
+.DS_Store
+Thumbs.db
