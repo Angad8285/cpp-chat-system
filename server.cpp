@@ -1,31 +1,33 @@
-// Bring the standard namespace into the global scope
-using namespace std;
-
 #include <iostream>
 #include <string>
-#include <cstring>      // For memset
-#include <unistd.h>     // For close()
-#include <sys/socket.h> // For socket APIs
-#include <netinet/in.h> // For sockaddr_in
+#include <vector>
+#include <cstring>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <sys/select.h> // The main header for select()
 
+using namespace std;
 
 const int PORT = 8080;
 const int BUFFER_SIZE = 1024;
 
 int main() {
-    // Step 1.1: Server Setup
-    // -----------------------
-    int server_fd, client_socket;
+    int server_fd, new_socket;
     struct sockaddr_in address;
     int opt = 1;
+    char buffer[BUFFER_SIZE] = {0};
 
-    // Create a socket file descriptor
+    // Data structures for select()
+    fd_set master_set, read_fds;
+    int fdmax;
+
+    // Initial server socket setup
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("socket failed");
         exit(EXIT_FAILURE);
     }
 
-    // Set socket options to allow reuse of the address and port
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
         perror("setsockopt");
         exit(EXIT_FAILURE);
@@ -35,57 +37,82 @@ int main() {
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
 
-
-    // Bind the socket to our specified IP and port
     if (::bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("bind failed");
         exit(EXIT_FAILURE);
     }
 
-    // Put the server socket in a passive mode, waiting for clients to connect
-    if (listen(server_fd, 3) < 0) {
+    if (listen(server_fd, 10) < 0) { // Increased backlog for more clients
         perror("listen");
         exit(EXIT_FAILURE);
     }
 
+    // Initialize the master fd_set
+    FD_ZERO(&master_set);
+    FD_SET(server_fd, &master_set);
+    fdmax = server_fd; // So far, it's this one
+
     cout << "Server listening on port " << PORT << "..." << endl;
 
-    // Step 1.2: Accepting a Connection
-    // ---------------------------------
-    int addrlen = sizeof(address);
-    if ((client_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
-        perror("accept");
-        exit(EXIT_FAILURE);
+    // Main server loop
+    while (true) {
+        read_fds = master_set; // Copy the master set
+
+        // select() is a blocking call, waiting for activity on any of the sockets
+        if (select(fdmax + 1, &read_fds, NULL, NULL, NULL) == -1) {
+            perror("select");
+            exit(EXIT_FAILURE);
+        }
+
+        // Loop through existing connections looking for data to read
+        for (int i = 0; i <= fdmax; i++) {
+            if (FD_ISSET(i, &read_fds)) { // We found one with activity
+                
+                // Case 1: Activity on the listening socket -> New connection
+                if (i == server_fd) {
+                    int addrlen = sizeof(address);
+                    if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
+                        perror("accept");
+                    } else {
+                        FD_SET(new_socket, &master_set); // Add to master set
+                        if (new_socket > fdmax) {
+                            fdmax = new_socket; // Keep track of the max
+                        }
+                        cout << "New connection on socket " << new_socket << endl;
+                    }
+                } 
+                // Case 2: Activity on an existing client socket -> Incoming data
+                else {
+                    int bytes_received;
+                    if ((bytes_received = recv(i, buffer, BUFFER_SIZE, 0)) <= 0) {
+                        // Error or connection closed by client
+                        if (bytes_received == 0) {
+                            cout << "Socket " << i << " disconnected." << endl;
+                        } else {
+                            perror("recv");
+                        }
+                        close(i);
+                        FD_CLR(i, &master_set); // Remove from master set
+                    } else {
+                        // We got some data from a client
+                        // Broadcast it to everyone else
+                        for (int j = 0; j <= fdmax; j++) {
+                            if (FD_ISSET(j, &master_set)) {
+                                // Except the listener and ourselves
+                                if (j != server_fd && j != i) {
+                                    if (send(j, buffer, bytes_received, 0) == -1) {
+                                        perror("send");
+                                    }
+                                }
+                            }
+                        }
+                        // Clear the buffer after sending
+                        memset(buffer, 0, BUFFER_SIZE);
+                    }
+                }
+            }
+        }
     }
-
-    cout << "Connection accepted!" << endl;
-
-    // Step 1.3: The "Echo" Logic
-    // ----------------------------
-    char buffer[BUFFER_SIZE] = {0};
-    int bytes_received;
-
-    // Keep receiving data until the client disconnects
-    while ((bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0)) > 0) {
-        cout << "Received from client: " << buffer << endl;
-
-        // Echo the data back to the client
-        send(client_socket, buffer, bytes_received, 0);
-
-        // Clear the buffer for the next message
-        memset(buffer, 0, BUFFER_SIZE);
-    }
-
-    if (bytes_received == 0) {
-        cout << "Client disconnected." << endl;
-    } else {
-        perror("recv failed");
-    }
-    
-    // Close the sockets
-    close(client_socket);
-    close(server_fd);
 
     return 0;
 }
-
