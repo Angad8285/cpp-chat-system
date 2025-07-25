@@ -3,9 +3,9 @@
 #include <cstring>
 #include <unistd.h>
 #include <sys/socket.h>
-#include <arpa/inet.h> // For inet_pton
+#include <arpa/inet.h>
+#include <sys/select.h>
 
-// Bring the standard namespace into the global scope
 using namespace std;
 
 const int PORT = 8080;
@@ -16,7 +16,6 @@ int main() {
     struct sockaddr_in serv_addr;
     char buffer[BUFFER_SIZE] = {0};
 
-    // Create a socket
     if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         cout << "Socket creation error" << endl;
         return -1;
@@ -25,47 +24,63 @@ int main() {
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(PORT);
 
-    // Convert IPv4 and IPv6 addresses from text to binary form
-    // "127.0.0.1" is the loopback address (localhost)
     if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) {
         cout << "Invalid address/ Address not supported" << endl;
         return -1;
     }
 
-    // Connect to the server
     if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
         cout << "Connection Failed" << endl;
         return -1;
     }
 
-    cout << "Connected to the server. Type 'exit' to quit." << endl;
+    cout << "Connected to the server. You can start typing." << endl;
 
-    string line;
     while (true) {
-        cout << "Client: ";
-        getline(cin, line);
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
         
-        if (line == "exit") {
-            break;
+        // Add standard input (keyboard) to the set
+        FD_SET(STDIN_FILENO, &read_fds); // STDIN_FILENO is usually 0
+        
+        // Add the server socket to the set
+        FD_SET(sock, &read_fds);
+
+        // We need to find the highest file descriptor for select()
+        int fdmax = (STDIN_FILENO > sock) ? STDIN_FILENO : sock;
+        
+        // Wait for activity on either stdin or the socket
+        if (select(fdmax + 1, &read_fds, NULL, NULL, NULL) == -1) {
+            perror("select");
+            exit(EXIT_FAILURE);
         }
 
-        // Send the message to the server
-        send(sock, line.c_str(), line.length(), 0);
-
-        // Receive the echo from the server
-        int bytes_received = recv(sock, buffer, BUFFER_SIZE, 0);
-        if (bytes_received > 0) {
-            cout << "Server echo: " << buffer << endl;
-        } else {
-            cout << "Server disconnected or error." << endl;
-            break;
+        // Check for activity on the socket (message from server)
+        if (FD_ISSET(sock, &read_fds)) {
+            int bytes_received = recv(sock, buffer, BUFFER_SIZE, 0);
+            if (bytes_received <= 0) {
+                cout << "\nServer disconnected." << endl;
+                break;
+            }
+            cout << "\n" << string(buffer, bytes_received) << endl;
+            memset(buffer, 0, BUFFER_SIZE);
+            cout << "Client: ";
+            fflush(stdout); // Ensure "Client: " prompt is displayed
         }
-        
-        // Clear the buffer
-        memset(buffer, 0, BUFFER_SIZE);
+
+        // Check for activity on stdin (user typed something)
+        if (FD_ISSET(STDIN_FILENO, &read_fds)) {
+            string line;
+            getline(cin, line);
+            if (line == "exit") {
+                break;
+            }
+            send(sock, line.c_str(), line.length(), 0);
+            cout << "Client: ";
+            fflush(stdout); // Ensure "Client: " prompt is displayed
+        }
     }
 
-    // Close the socket
     close(sock);
     return 0;
 }

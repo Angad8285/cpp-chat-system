@@ -5,7 +5,7 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <sys/select.h> // The main header for select()
+#include <sys/select.h>
 
 using namespace std;
 
@@ -18,11 +18,9 @@ int main() {
     int opt = 1;
     char buffer[BUFFER_SIZE] = {0};
 
-    // Data structures for select()
     fd_set master_set, read_fds;
     int fdmax;
 
-    // Initial server socket setup
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("socket failed");
         exit(EXIT_FAILURE);
@@ -42,71 +40,74 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
-    if (listen(server_fd, 10) < 0) { // Increased backlog for more clients
+    if (listen(server_fd, 10) < 0) {
         perror("listen");
         exit(EXIT_FAILURE);
     }
 
-    // Initialize the master fd_set
     FD_ZERO(&master_set);
     FD_SET(server_fd, &master_set);
-    fdmax = server_fd; // So far, it's this one
+    fdmax = server_fd;
 
     cout << "Server listening on port " << PORT << "..." << endl;
 
-    // Main server loop
     while (true) {
-        read_fds = master_set; // Copy the master set
-
-        // select() is a blocking call, waiting for activity on any of the sockets
+        read_fds = master_set;
         if (select(fdmax + 1, &read_fds, NULL, NULL, NULL) == -1) {
             perror("select");
             exit(EXIT_FAILURE);
         }
 
-        // Loop through existing connections looking for data to read
         for (int i = 0; i <= fdmax; i++) {
-            if (FD_ISSET(i, &read_fds)) { // We found one with activity
-                
-                // Case 1: Activity on the listening socket -> New connection
+            if (FD_ISSET(i, &read_fds)) {
                 if (i == server_fd) {
+                    // New connection
                     int addrlen = sizeof(address);
                     if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
                         perror("accept");
                     } else {
-                        FD_SET(new_socket, &master_set); // Add to master set
-                        if (new_socket > fdmax) {
-                            fdmax = new_socket; // Keep track of the max
-                        }
+                        FD_SET(new_socket, &master_set);
+                        if (new_socket > fdmax) fdmax = new_socket;
+                        
                         cout << "New connection on socket " << new_socket << endl;
+
+                        // **FIX**: Announce the new user to everyone else
+                        string welcome_msg = "Server: User " + to_string(new_socket) + " has joined.";
+                        for (int j = 0; j <= fdmax; j++) {
+                            if (FD_ISSET(j, &master_set) && j != server_fd && j != new_socket) {
+                                send(j, welcome_msg.c_str(), welcome_msg.length(), 0);
+                            }
+                        }
                     }
-                } 
-                // Case 2: Activity on an existing client socket -> Incoming data
-                else {
+                } else {
+                    // Data from an existing client
                     int bytes_received;
                     if ((bytes_received = recv(i, buffer, BUFFER_SIZE, 0)) <= 0) {
-                        // Error or connection closed by client
                         if (bytes_received == 0) {
                             cout << "Socket " << i << " disconnected." << endl;
+                            
+                            // **FIX**: Announce the user's departure
+                            string goodbye_msg = "Server: User " + to_string(i) + " has left.";
+                            for (int j = 0; j <= fdmax; j++) {
+                                if (FD_ISSET(j, &master_set) && j != server_fd && j != i) {
+                                    send(j, goodbye_msg.c_str(), goodbye_msg.length(), 0);
+                                }
+                            }
                         } else {
                             perror("recv");
                         }
                         close(i);
-                        FD_CLR(i, &master_set); // Remove from master set
+                        FD_CLR(i, &master_set);
                     } else {
-                        // We got some data from a client
-                        // Broadcast it to everyone else
+                        // Prepend sender info to the message
+                        string message = "User " + to_string(i) + ": " + string(buffer, bytes_received);
+
+                        // Broadcast the message to everyone else
                         for (int j = 0; j <= fdmax; j++) {
-                            if (FD_ISSET(j, &master_set)) {
-                                // Except the listener and ourselves
-                                if (j != server_fd && j != i) {
-                                    if (send(j, buffer, bytes_received, 0) == -1) {
-                                        perror("send");
-                                    }
-                                }
+                            if (FD_ISSET(j, &master_set) && j != server_fd && j != i) {
+                                send(j, message.c_str(), message.length(), 0);
                             }
                         }
-                        // Clear the buffer after sending
                         memset(buffer, 0, BUFFER_SIZE);
                     }
                 }
