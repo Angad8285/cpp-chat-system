@@ -5,21 +5,61 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <sys/select.h>
+#include <thread>
+#include <mutex>
+#include <algorithm> // For std::remove
 
 using namespace std;
 
 const int PORT = 8080;
 const int BUFFER_SIZE = 1024;
 
+// Shared resources for all threads
+vector<int> client_sockets;
+mutex mtx;
+
+void broadcast_message(const string& message, int sender_socket) {
+    lock_guard<mutex> guard(mtx);
+    for (int client_socket : client_sockets) {
+        if (client_socket != sender_socket) {
+            send(client_socket, message.c_str(), message.length(), 0);
+        }
+    }
+}
+
+void handle_client(int client_socket) {
+    char buffer[BUFFER_SIZE] = {0};
+    
+    // Announce the new user
+    string welcome_msg = "Server: User " + to_string(client_socket) + " has joined.";
+    cout << welcome_msg << endl;
+    broadcast_message(welcome_msg, client_socket);
+
+    int bytes_received;
+    while ((bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0)) > 0) {
+        string message = "User " + to_string(client_socket) + ": " + string(buffer, bytes_received);
+        cout << message << endl;
+        broadcast_message(message, client_socket);
+        memset(buffer, 0, BUFFER_SIZE);
+    }
+
+    // Handle disconnection
+    string goodbye_msg = "Server: User " + to_string(client_socket) + " has left.";
+    cout << goodbye_msg << endl;
+    broadcast_message(goodbye_msg, client_socket);
+
+    // Clean up: remove socket from the list and close it
+    {
+        lock_guard<mutex> guard(mtx);
+        client_sockets.erase(remove(client_sockets.begin(), client_sockets.end(), client_socket), client_sockets.end());
+    }
+    close(client_socket);
+}
+
 int main() {
-    int server_fd, new_socket;
+    int server_fd;
     struct sockaddr_in address;
     int opt = 1;
-    char buffer[BUFFER_SIZE] = {0};
-
-    fd_set master_set, read_fds;
-    int fdmax;
 
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("socket failed");
@@ -45,75 +85,27 @@ int main() {
         exit(EXIT_FAILURE);
     }
 
-    FD_ZERO(&master_set);
-    FD_SET(server_fd, &master_set);
-    fdmax = server_fd;
-
     cout << "Server listening on port " << PORT << "..." << endl;
 
     while (true) {
-        read_fds = master_set;
-        if (select(fdmax + 1, &read_fds, NULL, NULL, NULL) == -1) {
-            perror("select");
-            exit(EXIT_FAILURE);
+        int addrlen = sizeof(address);
+        int new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen);
+        if (new_socket < 0) {
+            perror("accept");
+            continue; // Continue to the next iteration
         }
 
-        for (int i = 0; i <= fdmax; i++) {
-            if (FD_ISSET(i, &read_fds)) {
-                if (i == server_fd) {
-                    // New connection
-                    int addrlen = sizeof(address);
-                    if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
-                        perror("accept");
-                    } else {
-                        FD_SET(new_socket, &master_set);
-                        if (new_socket > fdmax) fdmax = new_socket;
-                        
-                        cout << "New connection on socket " << new_socket << endl;
-
-                        // **FIX**: Announce the new user to everyone else
-                        string welcome_msg = "Server: User " + to_string(new_socket) + " has joined.";
-                        for (int j = 0; j <= fdmax; j++) {
-                            if (FD_ISSET(j, &master_set) && j != server_fd && j != new_socket) {
-                                send(j, welcome_msg.c_str(), welcome_msg.length(), 0);
-                            }
-                        }
-                    }
-                } else {
-                    // Data from an existing client
-                    int bytes_received;
-                    if ((bytes_received = recv(i, buffer, BUFFER_SIZE, 0)) <= 0) {
-                        if (bytes_received == 0) {
-                            cout << "Socket " << i << " disconnected." << endl;
-                            
-                            // **FIX**: Announce the user's departure
-                            string goodbye_msg = "Server: User " + to_string(i) + " has left.";
-                            for (int j = 0; j <= fdmax; j++) {
-                                if (FD_ISSET(j, &master_set) && j != server_fd && j != i) {
-                                    send(j, goodbye_msg.c_str(), goodbye_msg.length(), 0);
-                                }
-                            }
-                        } else {
-                            perror("recv");
-                        }
-                        close(i);
-                        FD_CLR(i, &master_set);
-                    } else {
-                        // Prepend sender info to the message
-                        string message = "User " + to_string(i) + ": " + string(buffer, bytes_received);
-
-                        // Broadcast the message to everyone else
-                        for (int j = 0; j <= fdmax; j++) {
-                            if (FD_ISSET(j, &master_set) && j != server_fd && j != i) {
-                                send(j, message.c_str(), message.length(), 0);
-                            }
-                        }
-                        memset(buffer, 0, BUFFER_SIZE);
-                    }
-                }
-            }
+        // Add the new client to our shared list
+        {
+            lock_guard<mutex> guard(mtx);
+            client_sockets.push_back(new_socket);
         }
+
+        // Create a new thread to handle this client
+        thread t(handle_client, new_socket);
+        t.detach(); // The main thread doesn't need to wait for this client thread to finish
     }
 
+    close(server_fd);
     return 0;
 }
